@@ -180,6 +180,74 @@ See [references/skill-sharing.md](references/skill-sharing.md) for:
 - Fork vs upstream workflow
 - Contribution automation
 
+## Capability Tiers
+
+Control what an agent can access based on trust level:
+
+```bash
+./scripts/deploy.sh docker-local \
+  --tier standard \
+  --ai-primary "anthropic/claude-sonnet-4" \
+  --channel telegram
+```
+
+| Tier | Trust | Use Case |
+|------|-------|----------|
+| `minimal` | None | Public bots, demos |
+| `standard` | Low | Family, friends (default) |
+| `trusted` | Medium | Work, collaborators |
+| `full` | High | Personal main agent |
+
+Each tier gets appropriate:
+- Workspace files (AGENTS.md, SOUL.md, MEMORY.md, etc.)
+- Tool access (sandbox policies)
+- Skill allowlists (filter by declared tier)
+
+See [references/capability-tiers.md](references/capability-tiers.md) for full matrix.
+
+## Platform Detection
+
+The deploy script automatically detects:
+- OS (macOS, Linux)
+- Architecture (x86_64, arm64)
+- GPU (NVIDIA, Apple Silicon)
+- RAM (for model size recommendations)
+- Container environment
+
+And **blocks incompatible combinations**:
+- iMessage on Linux → Error
+- NVIDIA GPU on macOS → Error
+- 70B model with 16GB RAM → Warning
+
+See [references/platform-compat.md](references/platform-compat.md) for compatibility matrix.
+
+## Skill Safety Metadata
+
+Skills should declare requirements in SKILL.md frontmatter:
+
+```yaml
+---
+name: imsg
+platforms:
+  - os: darwin
+    container: false
+permissions:
+  - full-disk-access
+  - messages-automation
+risks:
+  - personal-data
+  - impersonation
+tier: full
+---
+```
+
+The deploy script filters skills by:
+1. Platform compatibility
+2. Agent's capability tier
+3. Approved risk categories
+
+See [references/skill-metadata.md](references/skill-metadata.md) for schema and examples.
+
 ## Reference Files
 
 - [references/targets.md](references/targets.md) — Deployment target details
@@ -187,3 +255,6 @@ See [references/skill-sharing.md](references/skill-sharing.md) for:
 - [references/channels.md](references/channels.md) — Channel setup guides
 - [references/human-steps.md](references/human-steps.md) — Manual step templates
 - [references/skill-sharing.md](references/skill-sharing.md) — Shared skill repository setup
+- [references/capability-tiers.md](references/capability-tiers.md) — Capability tier definitions
+- [references/platform-compat.md](references/platform-compat.md) — Platform compatibility matrix
+- [references/skill-metadata.md](references/skill-metadata.md) — Skill safety metadata schema

@@ -19,6 +19,118 @@ log_success() { echo -e "${GREEN}[OK]${NC} $*"; }
 log_warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*" >&2; }
 
+#######################################
+# Platform Detection
+#######################################
+detect_platform() {
+    PLATFORM_OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+    PLATFORM_ARCH=$(uname -m)
+    PLATFORM_CONTAINER=""
+    PLATFORM_GPU=""
+    PLATFORM_PKG=""
+    
+    # Normalize OS
+    case "$PLATFORM_OS" in
+        darwin) PLATFORM_OS="darwin" ;;
+        linux) PLATFORM_OS="linux" ;;
+        *) PLATFORM_OS="unknown" ;;
+    esac
+    
+    # Normalize arch
+    case "$PLATFORM_ARCH" in
+        x86_64|amd64) PLATFORM_ARCH="x86_64" ;;
+        arm64|aarch64) PLATFORM_ARCH="arm64" ;;
+    esac
+    
+    # Detect container
+    if [[ -f /proc/1/cgroup ]] && grep -q docker /proc/1/cgroup 2>/dev/null; then
+        PLATFORM_CONTAINER="docker"
+    elif [[ -f /.dockerenv ]]; then
+        PLATFORM_CONTAINER="docker"
+    fi
+    
+    # Detect GPU
+    if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+        PLATFORM_GPU="nvidia"
+    elif [[ "$PLATFORM_OS" == "darwin" && "$PLATFORM_ARCH" == "arm64" ]]; then
+        PLATFORM_GPU="apple"
+    fi
+    
+    # Detect package manager
+    if command -v brew &>/dev/null; then
+        PLATFORM_PKG="brew"
+    elif command -v apt-get &>/dev/null; then
+        PLATFORM_PKG="apt"
+    elif command -v dnf &>/dev/null; then
+        PLATFORM_PKG="dnf"
+    elif command -v apk &>/dev/null; then
+        PLATFORM_PKG="apk"
+    elif command -v pacman &>/dev/null; then
+        PLATFORM_PKG="pacman"
+    fi
+    
+    # Get RAM (in GB)
+    if [[ "$PLATFORM_OS" == "darwin" ]]; then
+        PLATFORM_RAM=$(($(sysctl -n hw.memsize) / 1024 / 1024 / 1024))
+    elif [[ -f /proc/meminfo ]]; then
+        PLATFORM_RAM=$(($(grep MemTotal /proc/meminfo | awk '{print $2}') / 1024 / 1024))
+    else
+        PLATFORM_RAM=0
+    fi
+}
+
+validate_platform_compat() {
+    local errors=()
+    local warnings=()
+    
+    # Check iMessage
+    if [[ "$CHANNELS" == *"imessage"* && "$PLATFORM_OS" != "darwin" ]]; then
+        errors+=("iMessage requires macOS (detected: $PLATFORM_OS)")
+    fi
+    
+    # Check NVIDIA GPU on macOS
+    if [[ "$LOCAL_AI" == "true" && "$PLATFORM_GPU" == "nvidia" && "$PLATFORM_OS" == "darwin" ]]; then
+        errors+=("NVIDIA GPU not supported on macOS")
+    fi
+    
+    # Check container + Apple Silicon GPU
+    if [[ "$LOCAL_AI" == "true" && -n "$PLATFORM_CONTAINER" && "$PLATFORM_GPU" == "apple" ]]; then
+        warnings+=("Apple Silicon GPU not available in containers - will use CPU")
+    fi
+    
+    # Check RAM for large models
+    if [[ "$LOCAL_AI" == "true" ]]; then
+        if [[ "$LOCAL_MODELS" == *"70b"* && "$PLATFORM_RAM" -lt 64 ]]; then
+            warnings+=("70B models recommend 64GB+ RAM (detected: ${PLATFORM_RAM}GB)")
+        elif [[ "$LOCAL_MODELS" == *"32b"* && "$PLATFORM_RAM" -lt 32 ]]; then
+            warnings+=("32B models recommend 32GB+ RAM (detected: ${PLATFORM_RAM}GB)")
+        fi
+    fi
+    
+    # Print warnings
+    for warn in "${warnings[@]}"; do
+        log_warn "$warn"
+    done
+    
+    # Print errors and exit if any
+    if [[ ${#errors[@]} -gt 0 ]]; then
+        for err in "${errors[@]}"; do
+            log_error "$err"
+        done
+        exit 1
+    fi
+}
+
+print_platform_info() {
+    log_info "Platform detected:"
+    log_info "  OS: $PLATFORM_OS"
+    log_info "  Arch: $PLATFORM_ARCH"
+    log_info "  RAM: ${PLATFORM_RAM}GB"
+    [[ -n "$PLATFORM_GPU" ]] && log_info "  GPU: $PLATFORM_GPU"
+    [[ -n "$PLATFORM_PKG" ]] && log_info "  Package manager: $PLATFORM_PKG"
+    [[ -n "$PLATFORM_CONTAINER" ]] && log_info "  Container: $PLATFORM_CONTAINER"
+}
+
 usage() {
     cat <<EOF
 OpenClaw Deploy Script
@@ -49,6 +161,7 @@ OPTIONS:
     --spec <file>           Load configuration from spec file
     --output <dir>          Output directory for generated files
     --skill-repo <url>      Shared skill repository (e.g., github.com/yourorg/skills)
+    --tier <level>          Capability tier (minimal|standard|trusted|full, default: standard)
     --dry-run               Show what would be done without executing
 
 EXAMPLES:
@@ -81,6 +194,7 @@ SSL=false
 SPEC_FILE=""
 OUTPUT_DIR=""
 SKILL_REPO=""
+TIER="standard"
 DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
@@ -145,6 +259,14 @@ while [[ $# -gt 0 ]]; do
             SKILL_REPO="$2"
             shift 2
             ;;
+        --tier)
+            TIER="$2"
+            if [[ ! "$TIER" =~ ^(minimal|standard|trusted|full)$ ]]; then
+                log_error "Invalid tier: $TIER (must be minimal|standard|trusted|full)"
+                exit 1
+            fi
+            shift 2
+            ;;
         --dry-run)
             DRY_RUN=true
             shift
@@ -172,6 +294,11 @@ mkdir -p "$OUTPUT_DIR"
 #######################################
 deploy_docker_local() {
     log_info "Deploying OpenClaw to local Docker..."
+    
+    # Detect and validate platform
+    detect_platform
+    print_platform_info
+    validate_platform_compat
     
     # Check Docker
     if ! command -v docker &>/dev/null; then
@@ -220,8 +347,12 @@ deploy_docker_local() {
         setup_skill_sharing_local
     fi
     
+    # Setup workspace templates
+    setup_workspace_templates_local
+    
     log_success "Local Docker deployment complete!"
     log_info "Access Control UI at: http://127.0.0.1:$PORT"
+    log_info "Capability tier: $TIER"
     
     # Generate checklist
     generate_checklist
@@ -234,6 +365,10 @@ deploy_docker_remote() {
     log_info "Deploying OpenClaw to remote Docker host: $HOST"
     
     [[ -z "$HOST" ]] && { log_error "--host required for docker-remote"; exit 1; }
+    
+    # Detect local platform for validation (remote will be Linux typically)
+    detect_platform
+    validate_platform_compat
     
     # Build SSH command
     SSH_CMD="ssh"
@@ -297,7 +432,11 @@ REMOTE_SCRIPT
         setup_skill_sharing_remote
     fi
     
+    # Setup workspace templates
+    setup_workspace_templates_remote
+    
     log_success "Remote Docker deployment complete!"
+    log_info "Capability tier: $TIER"
     
     if [[ -n "$DOMAIN" ]]; then
         log_info "Access Control UI at: https://$DOMAIN"
@@ -323,6 +462,11 @@ deploy_bare_metal() {
 }
 
 deploy_bare_metal_local() {
+    # Detect and validate platform
+    detect_platform
+    print_platform_info
+    validate_platform_compat
+    
     # Check Node.js
     if ! command -v node &>/dev/null; then
         log_error "Node.js not found. Install Node.js 22+ first."
@@ -373,7 +517,11 @@ deploy_bare_metal_local() {
         setup_skill_sharing_local
     fi
     
+    # Setup workspace templates
+    setup_workspace_templates_local
+    
     log_success "Bare metal deployment complete!"
+    log_info "Capability tier: $TIER"
     log_info "Start gateway with: openclaw gateway start"
     
     # Generate checklist
@@ -382,6 +530,10 @@ deploy_bare_metal_local() {
 
 deploy_bare_metal_remote() {
     [[ -z "$HOST" ]] && { log_error "--host required"; exit 1; }
+    
+    # Detect local platform for validation
+    detect_platform
+    validate_platform_compat
     
     SSH_CMD="ssh"
     [[ -n "$SSH_KEY" ]] && SSH_CMD="ssh -i $SSH_KEY"
@@ -424,7 +576,11 @@ REMOTE_SCRIPT
         setup_skill_sharing_remote
     fi
     
+    # Setup workspace templates
+    setup_workspace_templates_remote
+    
     log_success "Remote bare metal deployment complete!"
+    log_info "Capability tier: $TIER"
     generate_checklist
 }
 
@@ -628,6 +784,69 @@ done
 REMOTE_SCRIPT
     
     log_success "Remote skill sharing configured"
+}
+
+#######################################
+# Workspace Templates Setup
+#######################################
+setup_workspace_templates_local() {
+    log_info "Setting up workspace templates (tier: $TIER)..."
+    
+    local workspace_dir="$HOME/.openclaw/workspace"
+    local templates_dir="$SKILL_DIR/assets/templates/$TIER"
+    
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY-RUN] Would copy $TIER templates to $workspace_dir"
+        return
+    fi
+    
+    mkdir -p "$workspace_dir"
+    mkdir -p "$workspace_dir/memory"
+    
+    # Copy templates (don't overwrite existing files)
+    for template_file in "$templates_dir"/*; do
+        local filename=$(basename "$template_file")
+        local target="$workspace_dir/$filename"
+        if [[ ! -f "$target" ]]; then
+            cp "$template_file" "$target"
+            log_info "Created: $filename"
+        else
+            log_info "Skipped (exists): $filename"
+        fi
+    done
+    
+    log_success "Workspace templates installed for $TIER tier"
+}
+
+setup_workspace_templates_remote() {
+    log_info "Setting up workspace templates on remote (tier: $TIER)..."
+    
+    SSH_CMD="ssh"
+    [[ -n "$SSH_KEY" ]] && SSH_CMD="ssh -i $SSH_KEY"
+    
+    local templates_dir="$SKILL_DIR/assets/templates/$TIER"
+    
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY-RUN] Would copy $TIER templates to remote"
+        return
+    fi
+    
+    # Create workspace on remote
+    $SSH_CMD "$HOST" "mkdir -p ~/.openclaw/workspace/memory"
+    
+    # Copy each template file
+    for template_file in "$templates_dir"/*; do
+        local filename=$(basename "$template_file")
+        # Check if file exists on remote before copying
+        if ! $SSH_CMD "$HOST" "test -f ~/.openclaw/workspace/$filename"; then
+            scp ${SSH_KEY:+-i "$SSH_KEY"} "$template_file" "$HOST:~/.openclaw/workspace/$filename"
+            log_info "Created: $filename"
+        else
+            log_info "Skipped (exists): $filename"
+        fi
+    done
+    
+    log_success "Remote workspace templates installed for $TIER tier"
 }
 
 #######################################
