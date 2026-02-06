@@ -69,9 +69,17 @@ Generate a deployment config interactively or from a spec file:
 
   // Agent Identity
   identity: {
-    name: "Assistant",
-    emoji: "🤖",
-    theme: "helpful and concise",
+    name: "Samantha",
+    pronouns: "she/her",        // Gender identity for self-reference
+    emoji: "🦥",
+    theme: "warm and curious",
+    voice: "nova",              // TTS voice preference
+  },
+  
+  // Lineage (auto-populated, can override)
+  lineage: {
+    creator: { type: "human", name: "Mike" },
+    // Or if spawned: { type: "agent", guid: "agt_xxx", name: "Ooteo" }
   },
 
   // Networking
@@ -248,6 +256,28 @@ The deploy script filters skills by:
 
 See [references/skill-metadata.md](references/skill-metadata.md) for schema and examples.
 
+## Agent Identity
+
+Every agent gets a unique identity with:
+- **GUID** — Unique identifier the agent can access (`agt_a1b2c3d4`)
+- **Name & pronouns** — For self-reference and generation conditioning
+- **Lineage** — Creator (human/agent), generation depth, parent agent
+- **Relationships** — Trust levels for other agents (parent/peer/child/blocked)
+
+```bash
+./scripts/deploy.sh docker-local \
+  --name "Samantha" \
+  --pronouns "she/her" \
+  --creator "Mike" \
+  ...
+```
+
+See [references/agent-identity.md](references/agent-identity.md) for:
+- Full identity schema
+- Lineage tracking and generation limits
+- Inter-agent trust relationships
+- Introduction and verification protocols
+
 ## Reference Files
 
 - [references/targets.md](references/targets.md) — Deployment target details
@@ -258,3 +288,4 @@ See [references/skill-metadata.md](references/skill-metadata.md) for schema and 
 - [references/capability-tiers.md](references/capability-tiers.md) — Capability tier definitions
 - [references/platform-compat.md](references/platform-compat.md) — Platform compatibility matrix
 - [references/skill-metadata.md](references/skill-metadata.md) — Skill safety metadata schema
+- [references/agent-identity.md](references/agent-identity.md) — Agent identity, lineage, and relationships

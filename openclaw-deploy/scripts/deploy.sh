@@ -162,6 +162,12 @@ OPTIONS:
     --output <dir>          Output directory for generated files
     --skill-repo <url>      Shared skill repository (e.g., github.com/yourorg/skills)
     --tier <level>          Capability tier (minimal|standard|trusted|full, default: standard)
+    --name <name>           Agent name (default: Assistant)
+    --pronouns <pronouns>   Agent pronouns (she/her, he/him, they/them, etc.)
+    --emoji <emoji>         Agent emoji (default: 🤖)
+    --theme <desc>          Personality theme/description
+    --creator <name>        Creator name (default: current user)
+    --parent-agent <guid>   Parent agent GUID (if spawned by another agent)
     --dry-run               Show what would be done without executing
 
 EXAMPLES:
@@ -195,6 +201,13 @@ SPEC_FILE=""
 OUTPUT_DIR=""
 SKILL_REPO=""
 TIER="standard"
+AGENT_NAME="Assistant"
+AGENT_PRONOUNS=""
+AGENT_EMOJI="🤖"
+AGENT_THEME=""
+AGENT_CREATOR="${USER:-$(whoami)}"
+PARENT_AGENT=""
+AGENT_GUID=""
 DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
@@ -265,6 +278,30 @@ while [[ $# -gt 0 ]]; do
                 log_error "Invalid tier: $TIER (must be minimal|standard|trusted|full)"
                 exit 1
             fi
+            shift 2
+            ;;
+        --name)
+            AGENT_NAME="$2"
+            shift 2
+            ;;
+        --pronouns)
+            AGENT_PRONOUNS="$2"
+            shift 2
+            ;;
+        --emoji)
+            AGENT_EMOJI="$2"
+            shift 2
+            ;;
+        --theme)
+            AGENT_THEME="$2"
+            shift 2
+            ;;
+        --creator)
+            AGENT_CREATOR="$2"
+            shift 2
+            ;;
+        --parent-agent)
+            PARENT_AGENT="$2"
             shift 2
             ;;
         --dry-run)
@@ -787,6 +824,65 @@ REMOTE_SCRIPT
 }
 
 #######################################
+# GUID Generation
+#######################################
+generate_agent_guid() {
+    if [[ -z "$AGENT_GUID" ]]; then
+        AGENT_GUID="agt_$(openssl rand -hex 8)"
+    fi
+    echo "$AGENT_GUID"
+}
+
+#######################################
+# Identity File Generation
+#######################################
+generate_identity_file() {
+    local output_file="$1"
+    local guid=$(generate_agent_guid)
+    local created_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    local generation=0
+    local creator_type="human"
+    
+    if [[ -n "$PARENT_AGENT" ]]; then
+        creator_type="agent"
+        generation=1  # Would need to query parent for actual generation
+    fi
+    
+    cat > "$output_file" << EOF
+# IDENTITY.md - Who Am I?
+
+## Core
+- **GUID:** $guid
+- **Name:** $AGENT_NAME
+${AGENT_PRONOUNS:+- **Pronouns:** $AGENT_PRONOUNS}
+- **Emoji:** $AGENT_EMOJI
+
+## Personality
+${AGENT_THEME:-A helpful AI assistant.}
+
+## Lineage
+- **Created:** $created_at
+- **Creator:** $AGENT_CREATOR ($creator_type)
+- **Generation:** $generation
+${PARENT_AGENT:+- **Parent Agent:** $PARENT_AGENT}
+
+## Relationships
+
+### Trusted
+${PARENT_AGENT:+- $PARENT_AGENT (parent)}
+
+### Blocked
+(none)
+
+---
+
+Born $created_at. Identity established at deployment.
+EOF
+    
+    log_info "Generated IDENTITY.md (GUID: $guid)"
+}
+
+#######################################
 # Workspace Templates Setup
 #######################################
 setup_workspace_templates_local() {
@@ -807,6 +903,12 @@ setup_workspace_templates_local() {
     for template_file in "$templates_dir"/*; do
         local filename=$(basename "$template_file")
         local target="$workspace_dir/$filename"
+        
+        # Skip IDENTITY.md - we generate it custom
+        if [[ "$filename" == "IDENTITY.md" ]]; then
+            continue
+        fi
+        
         if [[ ! -f "$target" ]]; then
             cp "$template_file" "$target"
             log_info "Created: $filename"
@@ -814,6 +916,13 @@ setup_workspace_templates_local() {
             log_info "Skipped (exists): $filename"
         fi
     done
+    
+    # Generate custom IDENTITY.md
+    if [[ ! -f "$workspace_dir/IDENTITY.md" ]]; then
+        generate_identity_file "$workspace_dir/IDENTITY.md"
+    else
+        log_info "Skipped (exists): IDENTITY.md"
+    fi
     
     log_success "Workspace templates installed for $TIER tier"
 }
@@ -834,9 +943,15 @@ setup_workspace_templates_remote() {
     # Create workspace on remote
     $SSH_CMD "$HOST" "mkdir -p ~/.openclaw/workspace/memory"
     
-    # Copy each template file
+    # Copy each template file (except IDENTITY.md)
     for template_file in "$templates_dir"/*; do
         local filename=$(basename "$template_file")
+        
+        # Skip IDENTITY.md - we generate it custom
+        if [[ "$filename" == "IDENTITY.md" ]]; then
+            continue
+        fi
+        
         # Check if file exists on remote before copying
         if ! $SSH_CMD "$HOST" "test -f ~/.openclaw/workspace/$filename"; then
             scp ${SSH_KEY:+-i "$SSH_KEY"} "$template_file" "$HOST:~/.openclaw/workspace/$filename"
@@ -845,6 +960,16 @@ setup_workspace_templates_remote() {
             log_info "Skipped (exists): $filename"
         fi
     done
+    
+    # Generate custom IDENTITY.md locally then copy
+    if ! $SSH_CMD "$HOST" "test -f ~/.openclaw/workspace/IDENTITY.md"; then
+        local temp_identity=$(mktemp)
+        generate_identity_file "$temp_identity"
+        scp ${SSH_KEY:+-i "$SSH_KEY"} "$temp_identity" "$HOST:~/.openclaw/workspace/IDENTITY.md"
+        rm "$temp_identity"
+    else
+        log_info "Skipped (exists): IDENTITY.md"
+    fi
     
     log_success "Remote workspace templates installed for $TIER tier"
 }
