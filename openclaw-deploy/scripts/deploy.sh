@@ -48,6 +48,7 @@ OPTIONS:
     --ssl                   Enable SSL (requires domain)
     --spec <file>           Load configuration from spec file
     --output <dir>          Output directory for generated files
+    --skill-repo <url>      Shared skill repository (e.g., github.com/yourorg/skills)
     --dry-run               Show what would be done without executing
 
 EXAMPLES:
@@ -79,6 +80,7 @@ PORT=18789
 SSL=false
 SPEC_FILE=""
 OUTPUT_DIR=""
+SKILL_REPO=""
 DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
@@ -137,6 +139,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --output)
             OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        --skill-repo)
+            SKILL_REPO="$2"
             shift 2
             ;;
         --dry-run)
@@ -207,6 +213,11 @@ deploy_docker_local() {
         ./docker-setup.sh
     else
         log_info "[DRY-RUN] Would run docker-setup.sh"
+    fi
+    
+    # Setup skill sharing if configured
+    if [[ -n "$SKILL_REPO" ]]; then
+        setup_skill_sharing_local
     fi
     
     log_success "Local Docker deployment complete!"
@@ -281,6 +292,11 @@ REMOTE_SCRIPT
         setup_ollama_remote
     fi
     
+    # Setup skill sharing if configured
+    if [[ -n "$SKILL_REPO" ]]; then
+        setup_skill_sharing_remote
+    fi
+    
     log_success "Remote Docker deployment complete!"
     
     if [[ -n "$DOMAIN" ]]; then
@@ -352,6 +368,11 @@ deploy_bare_metal_local() {
         log_info "[DRY-RUN] Would run: openclaw onboard"
     fi
     
+    # Setup skill sharing if configured
+    if [[ -n "$SKILL_REPO" ]]; then
+        setup_skill_sharing_local
+    fi
+    
     log_success "Bare metal deployment complete!"
     log_info "Start gateway with: openclaw gateway start"
     
@@ -396,6 +417,11 @@ REMOTE_SCRIPT
     
     if [[ "$LOCAL_AI" == "true" ]]; then
         setup_ollama_remote
+    fi
+    
+    # Setup skill sharing if configured
+    if [[ -n "$SKILL_REPO" ]]; then
+        setup_skill_sharing_remote
     fi
     
     log_success "Remote bare metal deployment complete!"
@@ -464,6 +490,144 @@ done
 REMOTE_SCRIPT
     
     log_success "Remote Ollama setup complete"
+}
+
+#######################################
+# Skill Sharing Setup
+#######################################
+setup_skill_sharing_local() {
+    [[ -z "$SKILL_REPO" ]] && return
+    
+    log_info "Setting up shared skill repository..."
+    
+    local repo_url="https://$SKILL_REPO"
+    local repo_dir="$HOME/.openclaw/workspace/openclaw-skills"
+    local scripts_dir="$HOME/.openclaw/workspace/scripts"
+    
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY-RUN] Would clone $repo_url to $repo_dir"
+        return
+    fi
+    
+    # Clone repo
+    if [[ ! -d "$repo_dir" ]]; then
+        git clone "$repo_url" "$repo_dir"
+    else
+        log_info "Skill repo already exists, pulling latest..."
+        cd "$repo_dir" && git pull
+    fi
+    
+    # Create scripts directory
+    mkdir -p "$scripts_dir"
+    
+    # Create push-skill.sh
+    cat > "$scripts_dir/push-skill.sh" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+SKILL_NAME="$1"
+SKILL_SRC="$HOME/.openclaw/skills/$SKILL_NAME"
+REPO_DIR="$HOME/.openclaw/workspace/openclaw-skills"
+[[ ! -d "$SKILL_SRC" ]] && { echo "Skill not found: $SKILL_SRC" >&2; exit 1; }
+echo "Copying $SKILL_NAME to repo..."
+rm -rf "$REPO_DIR/$SKILL_NAME"
+cp -r "$SKILL_SRC" "$REPO_DIR/$SKILL_NAME"
+cd "$REPO_DIR"
+git add "$SKILL_NAME"
+git commit -m "Update skill: $SKILL_NAME" || echo "No changes to commit"
+git push
+echo "✓ Pushed $SKILL_NAME to GitHub"
+SCRIPT
+    chmod +x "$scripts_dir/push-skill.sh"
+    
+    # Create push-all-skills.sh
+    cat > "$scripts_dir/push-all-skills.sh" <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+SKILLS_DIR="$HOME/.openclaw/skills"
+REPO_DIR="$HOME/.openclaw/workspace/openclaw-skills"
+cd "$REPO_DIR"
+for skill_dir in "$SKILLS_DIR"/*/; do
+    skill_name=$(basename "$skill_dir")
+    [[ -f "$skill_dir/SKILL.md" ]] || continue
+    echo "Syncing: $skill_name"
+    rm -rf "$REPO_DIR/$skill_name"
+    cp -r "$skill_dir" "$REPO_DIR/$skill_name"
+done
+git add -A
+git commit -m "Sync all skills: $(date +%Y-%m-%d)" || echo "No changes"
+git push
+echo "✓ All skills pushed"
+SCRIPT
+    chmod +x "$scripts_dir/push-all-skills.sh"
+    
+    # Sync existing skills from repo
+    log_info "Syncing skills from repo..."
+    for skill_dir in "$repo_dir"/*/; do
+        local skill_name=$(basename "$skill_dir")
+        [[ -f "$skill_dir/SKILL.md" ]] || continue
+        if [[ ! -d "$HOME/.openclaw/skills/$skill_name" ]]; then
+            log_info "Installing skill: $skill_name"
+            cp -r "$skill_dir" "$HOME/.openclaw/skills/$skill_name"
+        fi
+    done
+    
+    log_success "Skill sharing configured: $SKILL_REPO"
+}
+
+setup_skill_sharing_remote() {
+    [[ -z "$SKILL_REPO" ]] && return
+    
+    log_info "Setting up shared skill repository on remote..."
+    
+    SSH_CMD="ssh"
+    [[ -n "$SSH_KEY" ]] && SSH_CMD="ssh -i $SSH_KEY"
+    
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY-RUN] Would setup skill repo on $HOST"
+        return
+    fi
+    
+    $SSH_CMD "$HOST" bash <<REMOTE_SCRIPT
+SKILL_REPO="$SKILL_REPO"
+REPO_URL="https://\$SKILL_REPO"
+REPO_DIR="\$HOME/.openclaw/workspace/openclaw-skills"
+SCRIPTS_DIR="\$HOME/.openclaw/workspace/scripts"
+
+# Clone repo
+mkdir -p "\$HOME/.openclaw/workspace"
+if [[ ! -d "\$REPO_DIR" ]]; then
+    git clone "\$REPO_URL" "\$REPO_DIR"
+fi
+
+# Create scripts
+mkdir -p "\$SCRIPTS_DIR"
+
+cat > "\$SCRIPTS_DIR/push-skill.sh" <<'INNERSCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+SKILL_NAME="\$1"
+SKILL_SRC="\$HOME/.openclaw/skills/\$SKILL_NAME"
+REPO_DIR="\$HOME/.openclaw/workspace/openclaw-skills"
+[[ ! -d "\$SKILL_SRC" ]] && { echo "Skill not found: \$SKILL_SRC" >&2; exit 1; }
+rm -rf "\$REPO_DIR/\$SKILL_NAME"
+cp -r "\$SKILL_SRC" "\$REPO_DIR/\$SKILL_NAME"
+cd "\$REPO_DIR"
+git add "\$SKILL_NAME"
+git commit -m "Update skill: \$SKILL_NAME" || true
+git push
+INNERSCRIPT
+chmod +x "\$SCRIPTS_DIR/push-skill.sh"
+
+# Sync skills from repo
+mkdir -p "\$HOME/.openclaw/skills"
+for skill_dir in "\$REPO_DIR"/*/; do
+    skill_name=\$(basename "\$skill_dir")
+    [[ -f "\$skill_dir/SKILL.md" ]] || continue
+    [[ ! -d "\$HOME/.openclaw/skills/\$skill_name" ]] && cp -r "\$skill_dir" "\$HOME/.openclaw/skills/\$skill_name"
+done
+REMOTE_SCRIPT
+    
+    log_success "Remote skill sharing configured"
 }
 
 #######################################

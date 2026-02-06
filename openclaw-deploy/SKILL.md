@@ -159,9 +159,31 @@ This generates a markdown checklist of all manual steps:
   --local-ai
 ```
 
+## Shared Skill Repository
+
+New agents can contribute to a shared skill repo, so improvements propagate across all instances.
+
+```bash
+./scripts/deploy.sh docker-local \
+  --skill-repo "github.com/yourorg/openclaw-skills" \
+  ...
+```
+
+This:
+1. Clones the skill repo to `~/.openclaw/workspace/openclaw-skills/`
+2. Symlinks skills into `~/.openclaw/skills/`
+3. Adds push scripts to the workspace
+4. Configures AGENTS.md with contribution instructions
+
+See [references/skill-sharing.md](references/skill-sharing.md) for:
+- Setting up a shared skill repo
+- Fork vs upstream workflow
+- Contribution automation
+
 ## Reference Files
 
 - [references/targets.md](references/targets.md) — Deployment target details
 - [references/ai-providers.md](references/ai-providers.md) — AI provider configuration
 - [references/channels.md](references/channels.md) — Channel setup guides
 - [references/human-steps.md](references/human-steps.md) — Manual step templates
+- [references/skill-sharing.md](references/skill-sharing.md) — Shared skill repository setup
