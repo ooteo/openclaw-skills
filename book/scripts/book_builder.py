@@ -143,16 +143,20 @@ def batch_generate_images(image_list: list[dict], book_type: str = "text_heavy")
 # LLM CALL (pluggable)
 # ─────────────────────────────────────────────
 
-def call_llm(prompt: str, model: str = "qwen2.5:7b") -> str:
+def call_llm(prompt: str, model: str = "claude-opus-4-5-20251001") -> str:
     """
-    Call local LLM via Ollama CLI.
-    Swap this for any inference backend (OpenAI API, Anthropic, etc.)
+    Call Anthropic Claude API.
+    Default: Opus for book generation quality.
+    Swap model arg for haiku/sonnet on simpler tasks.
     """
-    cmd = ["ollama", "run", model, prompt]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-    if result.returncode != 0:
-        raise RuntimeError(f"LLM call failed:\n{result.stderr}")
-    return result.stdout.strip()
+    import anthropic
+    client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
+    message = client.messages.create(
+        model=model,
+        max_tokens=8096,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return message.content[0].text.strip()
 
 
 def parse_code_blocks(text: str) -> dict[str, str]:
